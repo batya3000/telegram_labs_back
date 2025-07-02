@@ -16,10 +16,13 @@ load_dotenv()
 app = FastAPI()
 COURSES_DIR = "courses"
 CREDENTIALS_FILE = "credentials.json"  # Файл с учетными данными Google API
+CODES_SHEET = "AuthCodes"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 ADMIN_LOGIN = os.getenv("ADMIN_LOGIN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Разрешить запросы с любых источников
@@ -488,3 +491,42 @@ async def upload_course(file: UploadFile = File(...)):
         f.write(content)
 
     return {"detail": "Курс успешно загружен"}
+
+
+class CodeLogin(BaseModel):
+    chat_id: int
+    code: str
+
+@app.post("/auth/code/login")
+def code_login(body: CodeLogin):
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+    header = [h.strip() for h in sheet.row_values(1)]
+    try:
+        chat_col_idx = header.index("tg_chat_id") + 1
+    except ValueError:
+        raise HTTPException(500, "column tg_chat_id not found")
+
+    # ищем строку с нужным кодом
+    records = sheet.get_all_records()
+    row_i, rec = next(
+        ((i, r) for i, r in enumerate(records, start=2)
+         if str(r["code"]).strip() == body.code),
+        (None, None),
+    )
+    if rec is None:
+        raise HTTPException(401, "invalid code")
+
+    code_owner = str(rec.get("tg_chat_id") or "").strip()
+    if code_owner and code_owner != str(body.chat_id):
+        raise HTTPException(401, "code bound to another chat")
+
+    if not code_owner:
+        sheet.update_cell(row_i, chat_col_idx, str(body.chat_id))
+
+    return {
+        "ok": True,
+        "student_name": rec.get("student_name", "").strip()
+    }
