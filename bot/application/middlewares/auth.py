@@ -29,7 +29,6 @@ class RequireAuth(BaseMiddleware):
                 if current_state == Auth.waiting_code.state:
                     return await handler(event, data)
 
-        # Для остальных сообщений требуется авторизация
         if await self.redis.sismember("students", event.from_user.id):
             return await handler(event, data)
 

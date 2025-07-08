@@ -14,7 +14,7 @@ course:
             - "Mark Polyak"
             - markpolyak
     google:
-        spreadsheet: 194lWv5E41BoNGcZFxxAXijMal8Lrh4BNHwdowWWxMvE
+        spreadsheet: 1_cmcRyLZg6-l9BO1gFz3uOpqKU4HdFXAHb2qa49L7SM
         info-sheet: График
         task-id-column: 0
         student-name-column: 2
@@ -191,14 +191,14 @@ course:
                 - Исходный код программы с комментариями
                 - Выводы
         "ЛР6":
-            github-prefix: os-task5
+            github-prefix: os-task6
             short-name: ЛР6
             taskid-max: 30
             penalty-max: 7
             moss:
                 language: cc
                 max-matches: 1000
-                local-path: lab5
+                local-path: lab6
                 additional:
                   - suai-os-2021
                   - suai-os-2022

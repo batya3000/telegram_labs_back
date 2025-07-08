@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 import os
 import yaml
 import gspread
@@ -14,9 +16,17 @@ import re
 
 load_dotenv()
 app = FastAPI()
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    print(f"Validation error: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": exc.body}
+    )
 COURSES_DIR = "courses"
 CREDENTIALS_FILE = "credentials.json"  # Файл с учетными данными Google API
-CODES_SHEET = "AuthCodes"
+CODES_SHEET = "users"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 ADMIN_LOGIN = os.getenv("ADMIN_LOGIN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
@@ -228,12 +238,21 @@ def get_course_groups(course_id: str):
 
     try:
         spreadsheet = client.open_by_key(spreadsheet_id)
-        sheet_names = [sheet.title for sheet in spreadsheet.worksheets() 
-                      if sheet.title not in [info_sheet, "AuthCodes"]]
+        all_sheets = [sheet.title for sheet in spreadsheet.worksheets() 
+                      if sheet.title not in [info_sheet, "users"]]
+        
+        course_filename = [f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")][int(course_id) - 1]
+        course_name = course_filename.replace(".yaml", "")
+        course_sheets = []
+        for sheet_name in all_sheets:
+            if "_" in sheet_name:
+                group_part, course_part = sheet_name.split("_", 1)
+                if course_part == course_name:
+                    course_sheets.append(group_part)
+        
+        return course_sheets
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sheets: {str(e)}")
-
-    return sheet_names
 
 
 @app.get("/courses/{course_id}/groups/{group_id}/labs")
@@ -249,10 +268,9 @@ def get_course_labs(course_id: str, group_id: str):
         data = yaml.safe_load(file)
         course_info = data.get("course", {})
         spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
-        labs = [lab["short-name"] for lab in course_info.get("labs", {}).values() if "short-name" in lab]
 
-    if not spreadsheet_id or not labs:
-        raise HTTPException(status_code=400, detail="Missing spreadsheet ID or labs in config")
+    if not spreadsheet_id:
+        raise HTTPException(status_code=400, detail="Missing spreadsheet ID in config")
 
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -261,15 +279,16 @@ def get_course_labs(course_id: str, group_id: str):
 
     try:
         spreadsheet = client.open_by_key(spreadsheet_id)
-        sheet = spreadsheet.worksheet(group_id)
+        
+        course_name = filename.replace(".yaml", "")
+        sheet_name = f"{group_id}_{course_name}"
+        sheet = spreadsheet.worksheet(sheet_name)
 
-
-        headers = sheet.row_values(2)[2:]
+        headers = sheet.row_values(1)[3:]
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Group not found in spreadsheet: {str(e)}")
 
-    available_labs = [lab for lab in labs if lab in headers]
-    return available_labs
+    return [lab for lab in headers if lab.startswith("ЛР")]
 
 
 @app.post("/courses/{course_id}/groups/{group_id}/register")
@@ -353,6 +372,9 @@ def normalize_lab_id(lab_id: str) -> str:
 class GradeRequest(BaseModel):
     github: str = Field(..., min_length=1)
 
+class ChatRegistrationRequest(BaseModel):
+    chat_id: int
+
 @app.post("/courses/{course_id}/groups/{group_id}/labs/{lab_id}/grade")
 def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest):
     files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
@@ -385,9 +407,6 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
         "Accept": "application/vnd.github+json"
     }
 
-    test_file_url = f"https://api.github.com/repos/{org}/{repo_name}/contents/test_main.py"
-    if requests.get(test_file_url, headers=headers).status_code != 200:
-        raise HTTPException(status_code=400, detail="⚠️ test_main.py не найден в репозитории")
 
     workflows_url = f"https://api.github.com/repos/{org}/{repo_name}/contents/.github/workflows"
     if requests.get(workflows_url, headers=headers).status_code != 200:
@@ -400,13 +419,6 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
 
     latest_sha = commits_resp.json()[0]["sha"]
 
-    commit_url = f"https://api.github.com/repos/{org}/{repo_name}/commits/{latest_sha}"
-    commit_files = requests.get(commit_url, headers=headers).json().get("files", [])
-    for f in commit_files:
-        if f["filename"] == "test_main.py" and f["status"] in ("removed", "modified"):
-            raise HTTPException(status_code=403, detail="🚨 Нельзя изменять test_main.py")
-        if f["filename"].startswith("tests/") and f["status"] in ("removed", "modified"):
-            raise HTTPException(status_code=403, detail="🚨 Нельзя изменять папку tests/")
 
     check_url = f"https://api.github.com/repos/{org}/{repo_name}/commits/{latest_sha}/check-runs"
     check_resp = requests.get(check_url, headers=headers)
@@ -443,7 +455,9 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
     client = gspread.authorize(creds)
 
     try:
-        sheet = client.open_by_key(spreadsheet_id).worksheet(group_id)
+        course_name = filename.replace(".yaml", "")
+        sheet_name = f"{group_id}_{course_name}"
+        sheet = client.open_by_key(spreadsheet_id).worksheet(sheet_name)
     except Exception:
         raise HTTPException(status_code=404, detail="Группа не найдена в Google Таблице")
 
@@ -453,12 +467,12 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
     except ValueError:
         raise HTTPException(status_code=400, detail="Столбец 'GitHub' не найден")
 
-    github_values = sheet.col_values(github_col_idx)[2:]
+    github_values = sheet.col_values(github_col_idx)[1:]
     if username not in github_values:
         raise HTTPException(status_code=404, detail="GitHub логин не найден в таблице. Зарегистрируйтесь.")
 
     lab_number = parse_lab_id(lab_id)
-    row_idx = github_values.index(username) + 3
+    row_idx = github_values.index(username) + 2
     lab_col = student_col + lab_number + lab_offset
     sheet.update_cell(row_idx, lab_col, final_result)
 
@@ -510,7 +524,6 @@ def code_login(body: CodeLogin):
     except ValueError:
         raise HTTPException(500, "column tg_chat_id not found")
 
-    # ищем строку с нужным кодом
     records = ws.get_all_records()
     row_i, rec = next(
         ((i, r) for i, r in enumerate(records, start=2)
@@ -616,7 +629,15 @@ def courses_for_chat(chat_id: int):
                 
                 worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
                 info_sheet = course_info.get("google", {}).get("info-sheet", "График")
-                available_groups = [name for name in worksheet_names if name not in [info_sheet, "AuthCodes"]]
+                
+                course_name = filename.replace(".yaml", "")
+                
+                available_groups = []
+                for sheet_name in worksheet_names:
+                    if sheet_name not in [info_sheet, "users"] and "_" in sheet_name:
+                        group_part, course_part = sheet_name.split("_", 1)
+                        if course_part == course_name:
+                            available_groups.append(group_part)
                 
                 if student_group in available_groups:
                     result.append({
@@ -628,3 +649,116 @@ def courses_for_chat(chat_id: int):
                     })
     
     return result
+
+@app.post("/courses/{course_id}/groups/{group_id}/register-by-chat")
+def register_student_by_chat(course_id: str, group_id: str, request: ChatRegistrationRequest):
+    chat_id = request.chat_id
+    
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+        client = gspread.authorize(creds)
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(404, "Student not found")
+
+        student_name = rec.get("student_name", "")
+        github = rec.get("github", "")
+        
+        if not github:
+            raise HTTPException(400, "GitHub username not found for student")
+    except Exception as e:
+        raise HTTPException(500, f"Registration error: {str(e)}")
+    
+    name_parts = student_name.split()
+    if len(name_parts) >= 2:
+        surname = name_parts[0]
+        name = name_parts[1]
+        patronymic = name_parts[2] if len(name_parts) >= 3 else ""
+    else:
+        surname = student_name
+        name = ""
+        patronymic = ""
+    
+    registration_data = {
+        "surname": surname,
+        "name": name,
+        "patronymic": patronymic,
+        "github": github
+    }
+    
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    try:
+        filename = files[int(course_id) - 1]
+    except (IndexError, ValueError):
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    file_path = os.path.join(COURSES_DIR, filename)
+    with open(file_path, "r", encoding="utf-8") as file:
+        data = yaml.safe_load(file)
+        course_info = data.get("course", {})
+        spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
+
+    if not spreadsheet_id:
+        raise HTTPException(status_code=400, detail="Spreadsheet ID not found")
+
+    course_client = gspread.authorize(creds)
+    course_spreadsheet = course_client.open_by_key(spreadsheet_id)
+    
+    course_name = filename.replace(".yaml", "")
+    sheet_name = f"{group_id}_{course_name}"
+    
+    try:
+        group_ws = course_spreadsheet.worksheet(sheet_name)
+    except:
+        raise HTTPException(status_code=404, detail=f"Group sheet {sheet_name} not found")
+
+    all_records = group_ws.get_all_records()
+    
+    existing_student = None
+    for i, record in enumerate(all_records):
+        student_col_value = str(record.get("Студент", "")).strip()
+        if student_col_value.lower() == student_name.lower():
+            existing_student = (i + 3, record)
+            break
+
+    if existing_student:
+        row_num, existing_record = existing_student
+        existing_github = str(existing_record.get("GitHub", "")).strip()
+        
+        if existing_github and existing_github != github:
+            return {"status": "conflict", "message": "Student registered with different GitHub"}
+        elif not existing_github:
+            group_ws.update_cell(row_num, 3, github)
+            return {"status": "updated", "github": github}
+        
+        return {"status": "already_registered", "github": github}
+    else:
+        next_row = len(all_records) + 2
+        next_id = len(all_records) + 1
+        group_ws.update_cell(next_row, 1, next_id)
+        group_ws.update_cell(next_row, 2, student_name)
+        group_ws.update_cell(next_row, 3, github)
+        
+        return {"status": "registered", "github": github}
+
+@app.get("/student-group/{chat_id}")
+def get_student_group(chat_id: int):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+    rec = next(
+        (r for r in ws.get_all_records()
+         if str(r.get("tg_chat_id")) == str(chat_id)),
+        None,
+    )
+    if rec is None:
+        raise HTTPException(404, "Student not found")
+
+    return {"group": rec.get("group"), "student_name": rec.get("student_name")}

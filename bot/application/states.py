@@ -6,5 +6,6 @@ class Auth(StatesGroup):
 
 class CourseSelection(StatesGroup):
     waiting_course = State()
-    waiting_group = State()
-    waiting_lab = State()
+
+class LabSubmission(StatesGroup):
+    waiting_lab_selection = State()
