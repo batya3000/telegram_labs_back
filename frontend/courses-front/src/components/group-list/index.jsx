@@ -13,10 +13,13 @@ export const GroupList = ({ courseId, onSelectGroup, onBack }) => {
     setLoading(true);
     fetchGroups(courseId)
       .then((data) => {
-        setGroups(data);
+        setGroups(Array.isArray(data) ? data : []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setGroups([]);
+        setLoading(false);
+      });
   }, [courseId]);
 
   return (

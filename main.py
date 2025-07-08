@@ -306,7 +306,7 @@ def register_student(course_id: str, group_id: str, student: StudentRegistration
     student_list = sheet.col_values(student_col)[2:]
 
     if full_name not in student_list:
-        raise HTTPException(status_code=404, detail={"message": "Студент не найден"})
+        raise HTTPException(status_code=406, detail={"message": "Студент не найден"})
 
     row_idx = student_list.index(full_name) + 3
 
@@ -358,7 +358,7 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
     try:
         filename = files[int(course_id) - 1]
     except (IndexError, ValueError):
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=401, detail="Course not found")
 
     file_path = os.path.join(COURSES_DIR, filename)
     with open(file_path, "r", encoding="utf-8") as file:
@@ -375,7 +375,7 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
     repo_prefix = lab_config.get("github-prefix")
 
     if not all([org, spreadsheet_id, repo_prefix]):
-        raise HTTPException(status_code=400, detail="Missing course configuration")
+        raise HTTPException(status_code=402, detail="Missing course configuration")
 
     username = request.github
     repo_name = f"{repo_prefix}-{username}"
@@ -386,16 +386,16 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
 
     test_file_url = f"https://api.github.com/repos/{org}/{repo_name}/contents/test_main.py"
     if requests.get(test_file_url, headers=headers).status_code != 200:
-        raise HTTPException(status_code=400, detail="⚠️ test_main.py не найден в репозитории")
+        raise HTTPException(status_code=403, detail="⚠️ test_main.py не найден в репозитории")
 
     workflows_url = f"https://api.github.com/repos/{org}/{repo_name}/contents/.github/workflows"
     if requests.get(workflows_url, headers=headers).status_code != 200:
-        raise HTTPException(status_code=400, detail="⚠️ Папка .github/workflows не найдена. CI не настроен")
+        raise HTTPException(status_code=404, detail="⚠️ Папка .github/workflows не найдена. CI не настроен")
 
     commits_url = f"https://api.github.com/repos/{org}/{repo_name}/commits"
     commits_resp = requests.get(commits_url, headers=headers)
     if commits_resp.status_code != 200 or not commits_resp.json():
-        raise HTTPException(status_code=404, detail="Нет коммитов в репозитории")
+        raise HTTPException(status_code=405, detail="Нет коммитов в репозитории")
 
     latest_sha = commits_resp.json()[0]["sha"]
 
@@ -403,14 +403,14 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
     commit_files = requests.get(commit_url, headers=headers).json().get("files", [])
     for f in commit_files:
         if f["filename"] == "test_main.py" and f["status"] in ("removed", "modified"):
-            raise HTTPException(status_code=403, detail="🚨 Нельзя изменять test_main.py")
+            raise HTTPException(status_code=406, detail="🚨 Нельзя изменять test_main.py")
         if f["filename"].startswith("tests/") and f["status"] in ("removed", "modified"):
-            raise HTTPException(status_code=403, detail="🚨 Нельзя изменять папку tests/")
+            raise HTTPException(status_code=407, detail="🚨 Нельзя изменять папку tests/")
 
     check_url = f"https://api.github.com/repos/{org}/{repo_name}/commits/{latest_sha}/check-runs"
     check_resp = requests.get(check_url, headers=headers)
     if check_resp.status_code != 200:
-        raise HTTPException(status_code=404, detail="Проверки CI не найдены")
+        raise HTTPException(status_code=409, detail="Проверки CI не найдены")
 
     check_runs = check_resp.json().get("check_runs", [])
     if not check_runs:
@@ -499,18 +499,18 @@ class CodeLogin(BaseModel):
 
 @app.post("/auth/code/login")
 def code_login(body: CodeLogin):
-    creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
     client = gspread.authorize(creds)
-    sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
 
-    header = [h.strip() for h in sheet.row_values(1)]
+    header = [h.strip() for h in ws.row_values(1)]
     try:
         chat_col_idx = header.index("tg_chat_id") + 1
     except ValueError:
         raise HTTPException(500, "column tg_chat_id not found")
 
     # ищем строку с нужным кодом
-    records = sheet.get_all_records()
+    records = ws.get_all_records()
     row_i, rec = next(
         ((i, r) for i, r in enumerate(records, start=2)
          if str(r["code"]).strip() == body.code),
@@ -524,9 +524,48 @@ def code_login(body: CodeLogin):
         raise HTTPException(401, "code bound to another chat")
 
     if not code_owner:
-        sheet.update_cell(row_i, chat_col_idx, str(body.chat_id))
+        ws.update_cell(row_i, chat_col_idx, str(body.chat_id))
 
     return {
         "ok": True,
         "student_name": rec.get("student_name", "").strip()
     }
+
+@app.get("/labs/by-chat/{chat_id}")
+def labs_for_chat(chat_id: int):
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    ws     = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+    rec = next(
+        (r for r in ws.get_all_records()
+         if str(r.get("tg_chat_id")) == str(chat_id)),
+        None,
+    )
+    if rec is None:
+        raise HTTPException(404, "student not found")
+
+    course_id = rec["course_id"]
+    group = rec["group"]
+
+    with open(f"courses/{course_id}.yaml", encoding="utf-8") as f:
+        course_yaml = yaml.safe_load(f)
+
+    course_block = course_yaml.get("course", {})
+    labs_dict    = course_block.get("labs", {})
+
+    result = []
+    for key, cfg in labs_dict.items():
+        if "groups" in cfg and group not in cfg["groups"]:
+            continue
+
+        result.append(
+            {
+                "key":        key,
+                "title":      cfg.get("short-name", key),
+                "deadline":   cfg.get("deadline"),
+                "repo_prefix": cfg["github-prefix"],
+            }
+        )
+
+    return {"labs": result}
