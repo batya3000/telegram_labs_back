@@ -228,7 +228,8 @@ def get_course_groups(course_id: str):
 
     try:
         spreadsheet = client.open_by_key(spreadsheet_id)
-        sheet_names = [sheet.title for sheet in spreadsheet.worksheets() if sheet.title != info_sheet]
+        sheet_names = [sheet.title for sheet in spreadsheet.worksheets() 
+                      if sheet.title not in [info_sheet, "AuthCodes"]]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sheets: {str(e)}")
 
@@ -545,27 +546,85 @@ def labs_for_chat(chat_id: int):
     if rec is None:
         raise HTTPException(404, "student not found")
 
-    course_id = rec["course_id"]
-    group = rec["group"]
-
-    with open(f"courses/{course_id}.yaml", encoding="utf-8") as f:
-        course_yaml = yaml.safe_load(f)
-
-    course_block = course_yaml.get("course", {})
-    labs_dict    = course_block.get("labs", {})
+    course_ids_str = rec.get("course_id", "")
+    allowed_course_ids = [cid.strip() for cid in course_ids_str.split(",") if cid.strip()]
+    group = str(rec["group"])
 
     result = []
-    for key, cfg in labs_dict.items():
-        if "groups" in cfg and group not in cfg["groups"]:
+    
+    for course_id in allowed_course_ids:
+        try:
+            with open(f"courses/{course_id}.yaml", encoding="utf-8") as f:
+                course_yaml = yaml.safe_load(f)
+
+            course_block = course_yaml.get("course", {})
+            labs_dict    = course_block.get("labs", {})
+
+            for key, cfg in labs_dict.items():
+                if "groups" in cfg and group not in cfg["groups"]:
+                    continue
+
+                result.append(
+                    {
+                        "key":        key,
+                        "title":      cfg.get("short-name", key),
+                        "deadline":   cfg.get("deadline"),
+                        "repo_prefix": cfg["github-prefix"],
+                        "course_name": course_block.get("name", course_id),
+                    }
+                )
+        except FileNotFoundError:
             continue
 
-        result.append(
-            {
-                "key":        key,
-                "title":      cfg.get("short-name", key),
-                "deadline":   cfg.get("deadline"),
-                "repo_prefix": cfg["github-prefix"],
-            }
-        )
-
     return {"labs": result}
+
+@app.get("/courses/by-chat/{chat_id}")
+def courses_for_chat(chat_id: int):
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    ws     = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+    rec = next(
+        (r for r in ws.get_all_records()
+         if str(r.get("tg_chat_id")) == str(chat_id)),
+        None,
+    )
+    if rec is None:
+        raise HTTPException(404, "student not found")
+
+    student_group = str(rec["group"])
+    course_ids_str = rec.get("course_id", "")
+    allowed_course_ids = [cid.strip() for cid in course_ids_str.split(",") if cid.strip()]
+    
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    
+    result = []
+    for i, filename in enumerate(files):
+        course_filename = filename.replace(".yaml", "")
+        if allowed_course_ids and course_filename not in allowed_course_ids:
+            continue
+            
+        file_path = os.path.join(COURSES_DIR, filename)
+        with open(file_path, "r", encoding="utf-8") as file:
+            data = yaml.safe_load(file)
+            course_info = data.get("course", {})
+            
+            spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
+            if spreadsheet_id:
+                course_client = gspread.authorize(creds)
+                spreadsheet = course_client.open_by_key(spreadsheet_id)
+                
+                worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
+                info_sheet = course_info.get("google", {}).get("info-sheet", "График")
+                available_groups = [name for name in worksheet_names if name not in [info_sheet, "AuthCodes"]]
+                
+                if student_group in available_groups:
+                    result.append({
+                        "id": str(i + 1),
+                        "name": course_info.get("name", "Unnamed Course"),
+                        "semester": course_info.get("semester", ""),
+                        "logo": course_info.get("logo", "/assets/default.png"),
+                        "email": course_info.get("email", "")
+                    })
+    
+    return result
