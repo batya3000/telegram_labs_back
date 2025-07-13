@@ -1,0 +1,78 @@
+course:
+    name: Machine Learning Basics
+    logo: "/assets/machine-learning.png"
+    alt-names:
+        - MLB
+        - Машинное обучение
+        - МЛ
+    semester: Весна 2025
+    email: mlb@ya.ru
+    timezone: UTC+3
+    github:
+        organization: suai-mlb-2025
+        teachers:
+            - "Teacher"
+            - teacher
+    google:
+        spreadsheet: 1_cmcRyLZg6-l9BO1gFz3uOpqKU4HdFXAHb2qa49L7SM
+        info-sheet: График
+        task-id-column: 0
+        student-name-column: 2
+        lab-column-offset: 1
+    staff:
+        - name: Преподаватель МЛ
+          title: доц.
+          status: лектор
+        - name: Преподаватель МЛ
+          title: доц.
+          status: лабораторные работы
+    labs:
+        "ЛР1":
+            github-prefix: mlb-task1
+            short-name: ЛР1
+            penalty-max: 5
+            ci:
+                - workflows
+            files:
+                - jupyter_assignment.ipynb
+                - matplotlib_assignment.ipynb
+                - pandas_assignment.ipynb
+            moss:
+                language: python
+            report:
+                - Цель работы
+                - Задание
+                - Исходный код с комментариями
+                - Выводы
+        "ЛР2":
+            github-prefix: mlb-task2
+            short-name: ЛР2
+            penalty-max: 6
+            ci:
+                - workflows
+            files:
+                - regression_assignment.ipynb
+            moss:
+                language: python
+            report:
+                - Цель работы
+                - Задание
+                - Исходный код с комментариями
+                - Выводы
+        "ЛР3":
+            github-prefix: mlb-task3
+            short-name: ЛР3
+            penalty-max: 7
+            ci:
+                - workflows
+            files:
+                - classification_assignment.ipynb
+            moss:
+                language: python
+            report:
+                - Цель работы
+                - Задание
+                - Исходный код с комментариями
+                - Выводы
+misc:
+    requests-timeout: 5

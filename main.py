@@ -27,6 +27,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 COURSES_DIR = "courses"
 CREDENTIALS_FILE = "credentials.json"  # Файл с учетными данными Google API
 CODES_SHEET = "users"
+ADMINS_SHEET = "admins"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 ADMIN_LOGIN = os.getenv("ADMIN_LOGIN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
@@ -462,24 +463,38 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
         raise HTTPException(status_code=404, detail="Группа не найдена в Google Таблице")
 
     header_row = sheet.row_values(1)
+    
+    id_values = sheet.col_values(1)[1:]
+    
     try:
         github_col_idx = header_row.index("GitHub") + 1
     except ValueError:
         raise HTTPException(status_code=400, detail="Столбец 'GitHub' не найден")
-
+    
     github_values = sheet.col_values(github_col_idx)[1:]
     if username not in github_values:
         raise HTTPException(status_code=404, detail="GitHub логин не найден в таблице. Зарегистрируйтесь.")
 
     lab_number = parse_lab_id(lab_id)
     row_idx = github_values.index(username) + 2
-    lab_col = student_col + lab_number + lab_offset
+    
+    headers = sheet.row_values(1)
+    lab_header = f"ЛР{lab_number}"
+    
+    try:
+        lab_col = headers.index(lab_header) + 1
+        print(f"[DEBUG] Lab {lab_id} (header '{lab_header}') for {username}: row {row_idx}, col {lab_col}")
+    except ValueError:
+        print(f"[DEBUG] Lab header '{lab_header}' not found in headers: {headers}")
+        lab_col = github_col_idx + lab_offset + lab_number
+        print(f"[DEBUG] Using fallback: row {row_idx}, col {lab_col}")
+    
     sheet.update_cell(row_idx, lab_col, final_result)
 
     return {
         "status": "updated",
         "result": final_result,
-        "message": f"Результат CI: {'✅ Все проверки пройдены' if final_result == '✓' else '❌ Обнаружены ошибки'}",
+        "message": f"{'✅ Все проверки пройдены' if final_result == '✓' else '❌ Обнаружены ошибки'}",
         "passed": result_string,
         "checks": summary
     }
@@ -512,6 +527,14 @@ class CodeLogin(BaseModel):
     chat_id: int
     code: str
 
+class GitHubUpdate(BaseModel):
+    chat_id: int
+    github: str
+
+class AdminCodeLogin(BaseModel):
+    chat_id: int
+    code: str
+
 @app.post("/auth/code/login")
 def code_login(body: CodeLogin):
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
@@ -537,13 +560,225 @@ def code_login(body: CodeLogin):
     if code_owner and code_owner != str(body.chat_id):
         raise HTTPException(401, "code bound to another chat")
 
+    is_new_chat_id = not code_owner
+    
+    if is_new_chat_id:
+        ws.update_cell(row_i, chat_col_idx, str(body.chat_id))
+
+    github_value = str(rec.get("github", "")).strip()
+    
+    return {
+        "ok": True,
+        "student_name": rec.get("student_name", "").strip(),
+        "has_github": bool(github_value and github_value != ""),
+        "is_new_chat_id": is_new_chat_id
+    }
+
+@app.post("/auth/github/update")
+def update_github(body: GitHubUpdate):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(CODES_SHEET)
+
+    header = [h.strip() for h in ws.row_values(1)]
+    try:
+        github_col_idx = header.index("github") + 1
+    except ValueError:
+        raise HTTPException(500, "column github not found")
+
+    records = ws.get_all_records()
+    row_i, rec = next(
+        ((i, r) for i, r in enumerate(records, start=2)
+         if str(r.get("tg_chat_id")) == str(body.chat_id)),
+        (None, None),
+    )
+    if rec is None:
+        raise HTTPException(404, "user not found")
+
+    # Проверяем что GitHub username существует
+    try:
+        github_response = requests.get(f"https://api.github.com/users/{body.github}")
+        if github_response.status_code != 200:
+            raise HTTPException(400, "GitHub пользователь не найден")
+    except requests.RequestException:
+        raise HTTPException(500, "Ошибка проверки GitHub пользователя")
+
+    ws.update_cell(row_i, github_col_idx, body.github)
+
+    return {
+        "ok": True,
+        "message": "GitHub успешно сохранен"
+    }
+
+@app.post("/auth/admin/code/login")
+def admin_code_login(body: AdminCodeLogin):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+
+    header = [h.strip() for h in ws.row_values(1)]
+    try:
+        chat_col_idx = header.index("tg_chat_id") + 1
+    except ValueError:
+        raise HTTPException(500, "column tg_chat_id not found in admins sheet")
+
+    records = ws.get_all_records()
+    row_i, rec = next(
+        ((i, r) for i, r in enumerate(records, start=2)
+         if str(r["code"]).strip() == body.code),
+        (None, None),
+    )
+    if rec is None:
+        raise HTTPException(401, "invalid admin code")
+
+    code_owner = str(rec.get("tg_chat_id") or "").strip()
+    if code_owner and code_owner != str(body.chat_id):
+        raise HTTPException(401, "admin code bound to another chat")
+
+    # Всегда обновляем chat_id (может быть повторный вход)
     if not code_owner:
         ws.update_cell(row_i, chat_col_idx, str(body.chat_id))
 
     return {
         "ok": True,
-        "student_name": rec.get("student_name", "").strip()
+        "admin_name": rec.get("admin_name", "").strip(),
+        "permissions": rec.get("permissions", "").strip()
     }
+
+@app.get("/admin/courses")
+def get_admin_courses(chat_id: int):
+    """Получить список курсов для админа"""
+    # Проверяем что пользователь админ
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+    # Возвращаем список всех курсов
+    courses = []
+    for index, filename in enumerate(sorted(os.listdir(COURSES_DIR)), start=1):
+        file_path = os.path.join(COURSES_DIR, filename)
+        if filename.endswith(".yaml") and os.path.isfile(file_path):
+            with open(file_path, "r", encoding="utf-8") as file:
+                try:
+                    data = yaml.safe_load(file)
+                except yaml.YAMLError as e:
+                    continue
+
+                if not isinstance(data, dict) or "course" not in data:
+                    continue
+
+                course_info = data["course"]
+                courses.append({
+                    "id": str(index),
+                    "filename": filename,
+                    "name": course_info.get("name", "Unknown"),
+                    "semester": course_info.get("semester", "Unknown"),
+                })
+    return courses
+
+@app.get("/admin/courses/{course_id}/yaml")
+def get_course_yaml(course_id: str, chat_id: int):
+    """Получить YAML содержимое курса"""
+    # Проверяем что пользователь админ
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    try:
+        filename = files[int(course_id) - 1]
+    except (IndexError, ValueError):
+        raise HTTPException(404, detail="Course not found")
+
+    file_path = os.path.join(COURSES_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(404, detail="Course file not found")
+
+    with open(file_path, "r", encoding="utf-8") as file:
+        content = file.read()
+
+    return {"filename": filename, "content": content}
+
+@app.delete("/admin/courses/{course_id}")
+def delete_course_admin(course_id: str, chat_id: int):
+    """Удалить курс (только для админов)"""
+    # Проверяем что пользователь админ
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    try:
+        filename = files[int(course_id) - 1]
+    except (IndexError, ValueError):
+        raise HTTPException(status_code=404, detail="Курс не найден")
+
+    file_path = os.path.join(COURSES_DIR, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return {"message": f"Курс {filename} успешно удален"}
+    else:
+        raise HTTPException(status_code=404, detail="Файл курса не найден")
+
+@app.get("/admin/check-chat/{chat_id}")
+def check_admin_chat(chat_id: int):
+    """Проверить является ли пользователь админом по chat_id"""
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+        
+        return {"is_admin": True, "admin_name": rec.get("name", "администратор")}
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+@app.post("/auth/admin/logout")
+def admin_logout(body: AdminCodeLogin):
+    """Выйти из админской сессии"""
+    # В данной реализации мы просто возвращаем успех
+    # так как состояние хранится в памяти бота
+    return {"message": "Выход выполнен"}
 
 @app.get("/labs/by-chat/{chat_id}")
 def labs_for_chat(chat_id: int):
@@ -624,8 +859,12 @@ def courses_for_chat(chat_id: int):
             
             spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
             if spreadsheet_id:
-                course_client = gspread.authorize(creds)
-                spreadsheet = course_client.open_by_key(spreadsheet_id)
+                try:
+                    course_client = gspread.authorize(creds)
+                    spreadsheet = course_client.open_by_key(spreadsheet_id)
+                except (PermissionError, Exception) as e:
+                    print(f"Ошибка доступа к Google Sheets для курса {filename}: {e}")
+                    continue
                 
                 worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
                 info_sheet = course_info.get("google", {}).get("info-sheet", "График")
@@ -735,13 +974,13 @@ def register_student_by_chat(course_id: str, group_id: str, request: ChatRegistr
             return {"status": "conflict", "message": "Student registered with different GitHub"}
         elif not existing_github:
             group_ws.update_cell(row_num, 3, github)
-            return {"status": "updated", "github": github}
         
-        return {"status": "already_registered", "github": github}
+        group_ws.update_cell(row_num, 1, str(chat_id))
+        
+        return {"status": "updated" if not existing_github else "already_registered", "github": github}
     else:
         next_row = len(all_records) + 2
-        next_id = len(all_records) + 1
-        group_ws.update_cell(next_row, 1, next_id)
+        group_ws.update_cell(next_row, 1, str(chat_id))
         group_ws.update_cell(next_row, 2, student_name)
         group_ws.update_cell(next_row, 3, github)
         

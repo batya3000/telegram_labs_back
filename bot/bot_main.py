@@ -3,7 +3,7 @@ import redis.asyncio as redis
 from aiogram import Bot, Dispatcher
 
 from bot_settings import Settings
-from application.handlers import start, courses
+from application.handlers import start, courses, admin
 from application.middlewares.auth import RequireAuth
 
 
@@ -18,8 +18,10 @@ async def main() -> None:
     dp["redis"] = redis_client
 
     dp.message.middleware(RequireAuth(redis_client))
+    dp.callback_query.middleware(RequireAuth(redis_client))
     dp.include_router(start.router)
     dp.include_router(courses.router)
+    dp.include_router(admin.router)
 
     await dp.start_polling(bot)
 
