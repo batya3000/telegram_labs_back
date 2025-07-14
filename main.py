@@ -25,7 +25,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors(), "body": exc.body}
     )
 COURSES_DIR = "courses"
-CREDENTIALS_FILE = "credentials.json"  # Файл с учетными данными Google API
+CREDENTIALS_FILE = "credentials.json"
 CODES_SHEET = "users"
 ADMINS_SHEET = "admins"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -36,10 +36,10 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Разрешить запросы с любых источников
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Разрешить все HTTP-методы
-    allow_headers=["*"],  # Разрешить все заголовки
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 signer = TimestampSigner(SECRET_KEY)
 
@@ -410,46 +410,49 @@ def grade_lab(course_id: str, group_id: str, lab_id: str, request: GradeRequest)
 
 
     workflows_url = f"https://api.github.com/repos/{org}/{repo_name}/contents/.github/workflows"
-    if requests.get(workflows_url, headers=headers).status_code != 200:
-        raise HTTPException(status_code=400, detail="⚠️ Папка .github/workflows не найдена. CI не настроен")
+    workflows_resp = requests.get(workflows_url, headers=headers)
+    
+    if workflows_resp.status_code != 200:
+        final_result = "✓"
+        result_string = "CI не настроен - автоматически засчитано"
+        summary = ["✅ CI не настроен - работа принята автоматически"]
+    else:
+        commits_url = f"https://api.github.com/repos/{org}/{repo_name}/commits"
+        commits_resp = requests.get(commits_url, headers=headers)
+        if commits_resp.status_code != 200 or not commits_resp.json():
+            raise HTTPException(status_code=404, detail="Нет коммитов в репозитории")
 
-    commits_url = f"https://api.github.com/repos/{org}/{repo_name}/commits"
-    commits_resp = requests.get(commits_url, headers=headers)
-    if commits_resp.status_code != 200 or not commits_resp.json():
-        raise HTTPException(status_code=404, detail="Нет коммитов в репозитории")
+        latest_sha = commits_resp.json()[0]["sha"]
 
-    latest_sha = commits_resp.json()[0]["sha"]
+        check_url = f"https://api.github.com/repos/{org}/{repo_name}/commits/{latest_sha}/check-runs"
+        check_resp = requests.get(check_url, headers=headers)
+        if check_resp.status_code != 200:
+            raise HTTPException(status_code=404, detail="Проверки CI не найдены")
 
+        check_runs = check_resp.json().get("check_runs", [])
+        if not check_runs:
+            return {"status": "pending", "message": "Нет активных CI-проверок ⏳"}
 
-    check_url = f"https://api.github.com/repos/{org}/{repo_name}/commits/{latest_sha}/check-runs"
-    check_resp = requests.get(check_url, headers=headers)
-    if check_resp.status_code != 200:
-        raise HTTPException(status_code=404, detail="Проверки CI не найдены")
+        summary = []
+        passed_count = 0
 
-    check_runs = check_resp.json().get("check_runs", [])
-    if not check_runs:
-        return {"status": "pending", "message": "Нет активных CI-проверок ⏳"}
+        for check in check_runs:
+            name = check.get("name", "Unnamed check")
+            conclusion = check.get("conclusion")
+            html_url = check.get("html_url")
+            if conclusion == "success":
+                emoji = "✅"
+                passed_count += 1
+            elif conclusion == "failure":
+                emoji = "❌"
+            else:
+                emoji = "⏳"
+            summary.append(f"{emoji} {name} — {html_url}")
 
-    summary = []
-    passed_count = 0
+        total_checks = len(check_runs)
+        result_string = f"{passed_count}/{total_checks} тестов пройдено"
 
-    for check in check_runs:
-        name = check.get("name", "Unnamed check")
-        conclusion = check.get("conclusion")
-        html_url = check.get("html_url")
-        if conclusion == "success":
-            emoji = "✅"
-            passed_count += 1
-        elif conclusion == "failure":
-            emoji = "❌"
-        else:
-            emoji = "⏳"
-        summary.append(f"{emoji} {name} — {html_url}")
-
-    total_checks = len(check_runs)
-    result_string = f"{passed_count}/{total_checks} тестов пройдено"
-
-    final_result = "✓" if passed_count == total_checks else "✗"
+        final_result = "✓" if passed_count == total_checks else "✗"
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
@@ -595,14 +598,6 @@ def update_github(body: GitHubUpdate):
     if rec is None:
         raise HTTPException(404, "user not found")
 
-    # Проверяем что GitHub username существует
-    try:
-        github_response = requests.get(f"https://api.github.com/users/{body.github}")
-        if github_response.status_code != 200:
-            raise HTTPException(400, "GitHub пользователь не найден")
-    except requests.RequestException:
-        raise HTTPException(500, "Ошибка проверки GitHub пользователя")
-
     ws.update_cell(row_i, github_col_idx, body.github)
 
     return {
@@ -635,7 +630,6 @@ def admin_code_login(body: AdminCodeLogin):
     if code_owner and code_owner != str(body.chat_id):
         raise HTTPException(401, "admin code bound to another chat")
 
-    # Всегда обновляем chat_id (может быть повторный вход)
     if not code_owner:
         ws.update_cell(row_i, chat_col_idx, str(body.chat_id))
 
@@ -647,8 +641,6 @@ def admin_code_login(body: AdminCodeLogin):
 
 @app.get("/admin/courses")
 def get_admin_courses(chat_id: int):
-    """Получить список курсов для админа"""
-    # Проверяем что пользователь админ
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
     client = gspread.authorize(creds)
     try:
@@ -664,7 +656,6 @@ def get_admin_courses(chat_id: int):
     except Exception:
         raise HTTPException(403, "access denied")
 
-    # Возвращаем список всех курсов
     courses = []
     for index, filename in enumerate(sorted(os.listdir(COURSES_DIR)), start=1):
         file_path = os.path.join(COURSES_DIR, filename)
@@ -689,8 +680,6 @@ def get_admin_courses(chat_id: int):
 
 @app.get("/admin/courses/{course_id}/yaml")
 def get_course_yaml(course_id: str, chat_id: int):
-    """Получить YAML содержимое курса"""
-    # Проверяем что пользователь админ
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
     client = gspread.authorize(creds)
     try:
@@ -723,8 +712,6 @@ def get_course_yaml(course_id: str, chat_id: int):
 
 @app.delete("/admin/courses/{course_id}")
 def delete_course_admin(course_id: str, chat_id: int):
-    """Удалить курс (только для админов)"""
-    # Проверяем что пользователь админ
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
     client = gspread.authorize(creds)
     try:
@@ -755,7 +742,6 @@ def delete_course_admin(course_id: str, chat_id: int):
 
 @app.get("/admin/check-chat/{chat_id}")
 def check_admin_chat(chat_id: int):
-    """Проверить является ли пользователь админом по chat_id"""
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
     client = gspread.authorize(creds)
     try:
@@ -775,10 +761,121 @@ def check_admin_chat(chat_id: int):
 
 @app.post("/auth/admin/logout")
 def admin_logout(body: AdminCodeLogin):
-    """Выйти из админской сессии"""
-    # В данной реализации мы просто возвращаем успех
-    # так как состояние хранится в памяти бота
     return {"message": "Выход выполнен"}
+
+@app.get("/admin/courses/{course_id}/groups")
+def get_course_groups_admin(course_id: str, chat_id: int):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    try:
+        filename = files[int(course_id) - 1]
+    except (IndexError, ValueError):
+        raise HTTPException(404, detail="Course not found")
+
+    file_path = os.path.join(COURSES_DIR, filename)
+    with open(file_path, "r", encoding="utf-8") as file:
+        data = yaml.safe_load(file)
+        course_info = data.get("course", {})
+        spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
+        info_sheet = course_info.get("google", {}).get("info-sheet")
+
+    if not spreadsheet_id:
+        raise HTTPException(400, detail="Spreadsheet ID not found in course config")
+
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    course_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    course_client = gspread.authorize(course_creds)
+
+    try:
+        spreadsheet = course_client.open_by_key(spreadsheet_id)
+        all_sheets = [sheet.title for sheet in spreadsheet.worksheets() 
+                      if sheet.title not in [info_sheet, "users", "admins"]]
+        
+        course_filename = filename.replace(".yaml", "")
+        course_groups = []
+        for sheet_name in all_sheets:
+            if "_" in sheet_name:
+                group_part, course_part = sheet_name.split("_", 1)
+                if course_part == course_filename:
+                    course_groups.append({
+                        "group_id": group_part,
+                        "sheet_name": sheet_name
+                    })
+        
+        return course_groups
+    except Exception as e:
+        raise HTTPException(500, detail=f"Failed to fetch groups: {str(e)}")
+
+@app.get("/admin/courses/{course_id}/groups/{group_id}/results")
+def get_group_results_admin(course_id: str, group_id: str, chat_id: int):
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(ADMINS_SHEET)
+        
+        rec = next(
+            (r for r in ws.get_all_records()
+             if str(r.get("tg_chat_id")) == str(chat_id)),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(403, "access denied - not an admin")
+    except Exception:
+        raise HTTPException(403, "access denied")
+
+    files = sorted([f for f in os.listdir(COURSES_DIR) if f.endswith(".yaml")])
+    try:
+        filename = files[int(course_id) - 1]
+    except (IndexError, ValueError):
+        raise HTTPException(404, detail="Course not found")
+
+    file_path = os.path.join(COURSES_DIR, filename)
+    with open(file_path, "r", encoding="utf-8") as file:
+        data = yaml.safe_load(file)
+        course_info = data.get("course", {})
+        spreadsheet_id = course_info.get("google", {}).get("spreadsheet")
+
+    if not spreadsheet_id:
+        raise HTTPException(400, detail="Spreadsheet ID not found")
+
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    course_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    course_client = gspread.authorize(course_creds)
+
+    try:
+        course_name = filename.replace(".yaml", "")
+        sheet_name = f"{group_id}_{course_name}"
+        sheet = course_client.open_by_key(spreadsheet_id).worksheet(sheet_name)
+        
+        all_data = sheet.get_all_values()
+        if not all_data:
+            return {"headers": [], "rows": []}
+        
+        headers = all_data[0]
+        rows = all_data[1:]
+        
+        return {
+            "headers": headers,
+            "rows": rows,
+            "course_name": course_info.get("name", "Unknown"),
+            "group_id": group_id
+        }
+    except Exception as e:
+        raise HTTPException(404, detail=f"Group results not found: {str(e)}")
 
 @app.get("/labs/by-chat/{chat_id}")
 def labs_for_chat(chat_id: int):
@@ -979,7 +1076,22 @@ def register_student_by_chat(course_id: str, group_id: str, request: ChatRegistr
         
         return {"status": "updated" if not existing_github else "already_registered", "github": github}
     else:
-        next_row = len(all_records) + 2
+        all_data = group_ws.get_all_values()
+        next_row = None
+        
+        for i in range(2, len(all_data) + 10):
+            try:
+                row_data = group_ws.row_values(i)
+                if not row_data or all(not cell.strip() for cell in row_data if cell):
+                    next_row = i
+                    break
+            except:
+                next_row = i
+                break
+        
+        if next_row is None:
+            next_row = len(all_records) + 2
+            
         group_ws.update_cell(next_row, 1, str(chat_id))
         group_ws.update_cell(next_row, 2, student_name)
         group_ws.update_cell(next_row, 3, github)

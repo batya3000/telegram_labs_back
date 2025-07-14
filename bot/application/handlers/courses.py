@@ -2,6 +2,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.client.session import aiohttp
+import aiohttp as aiohttp_module
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from ..states import CourseSelection, LabSubmission
@@ -22,12 +23,11 @@ async def list_courses(msg: types.Message, state: FSMContext, settings: Settings
     await list_courses_impl(msg, state, settings, msg.from_user.id)
 
 async def list_courses_impl(msg: types.Message, state: FSMContext, settings: Settings, user_id: int, is_callback: bool = False):
-    # Удаляем предыдущее сообщение если это callback
     if is_callback:
         try:
             await msg.delete()
         except:
-            pass  # Игнорируем ошибки удаления
+            pass
     
     async with aiohttp.ClientSession() as s:
         r = await s.get(f"{settings.API_BASE}/courses/by-chat/{user_id}")
@@ -53,7 +53,6 @@ async def list_courses_impl(msg: types.Message, state: FSMContext, settings: Set
             callback_data=f"course_{course['id']}"
         )])
     
-    # Добавляем кнопку "Главное меню"
     keyboard_buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
@@ -151,7 +150,6 @@ async def select_course_impl(msg: types.Message, state: FSMContext, settings: Se
                 callback_data=f"lab_{i}"
             )])
         
-        # Добавляем навигационные кнопки
         keyboard_buttons.append([
             InlineKeyboardButton(text="⬅️ Назад к курсам", callback_data="back_to_courses")
         ])
@@ -189,11 +187,10 @@ async def submit_lab(msg: types.Message, state: FSMContext, settings: Settings):
     await submit_lab_impl(msg, state, settings, msg.from_user.id, lab_index)
 
 async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Settings, user_id: int, lab_index: int):
-    # Удаляем предыдущее сообщение
     try:
         await msg.delete()
     except:
-        pass  # Игнорируем ошибки удаления
+        pass
     
     data = await state.get_data()
     course_id = data['course_id']
@@ -239,7 +236,6 @@ async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Setti
             passed = grade_data.get("passed", "")
             checks = grade_data.get("checks", [])
             
-            # Основное сообщение с результатом
             response_text = f"📊 **Результат проверки {selected_lab}**\n\n"
             
             if status == "updated":
@@ -247,7 +243,6 @@ async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Setti
                 if passed:
                     response_text += f"{passed}\n\n"
                 
-                # Детальная информация по каждому тесту
                 if checks:
                     response_text += "**Детали:**\n"
                     for check in checks:
@@ -263,20 +258,17 @@ async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Setti
             else:
                 response_text += f"ℹ️ {message}"
             
-            # Удаляем сообщение прогресса
             try:
                 await progress_msg.delete()
             except:
                 pass
             
-            # Добавляем кнопку для возврата к курсам
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📚 К курсам", callback_data="back_to_courses")]
             ])
             
             await msg.answer(response_text, parse_mode="Markdown", reply_markup=keyboard)
         else:
-            # Удаляем сообщение прогресса
             try:
                 await progress_msg.delete()
             except:
@@ -285,7 +277,6 @@ async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Setti
             error_data = await grade_response.json() if grade_response.headers.get('content-type', '').startswith('application/json') else {}
             error_message = error_data.get("detail", "Неизвестная ошибка")
             
-            # Добавляем кнопку для возврата к курсам даже при ошибке
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📚 К курсам", callback_data="back_to_courses")]
             ])
@@ -294,12 +285,11 @@ async def submit_lab_impl(msg: types.Message, state: FSMContext, settings: Setti
     
     await state.clear()
 
-# Обработчики навигационных кнопок
 @router.callback_query(F.data == "back_to_courses")
 async def back_to_courses_callback(callback: CallbackQuery, state: FSMContext, settings: Settings):
     await callback.answer()
     await state.clear()
-    # Удаляем текущее сообщение перед показом курсов
+
     try:
         await callback.message.delete()
     except:
@@ -311,7 +301,6 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
     
-    # Удаляем текущее сообщение
     try:
         await callback.message.delete()
     except:

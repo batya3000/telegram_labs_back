@@ -18,3 +18,5 @@ class AdminPanel(StatesGroup):
     viewing_courses = State()
     viewing_course_yaml = State()
     confirming_delete = State()
+    viewing_groups = State()
+    viewing_results = State()
